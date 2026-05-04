@@ -1,23 +1,31 @@
 import os
 import json
 import requests
-import pandas as pd
 
 API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 STATE_FILE = "state.json"
-TICKERS_FILE = "tickers.txt"
+
+MA_PRIORITY = {
+    "D_EMA8": 1,
+    "D_EMA20": 2,
+    "D_SMA50": 3,
+    "W_EMA8": 4,
+}
 
 
-# -------------------------
+# =========================
 # UTIL
-# -------------------------
+# =========================
 
 def send(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    requests.post(url, data={
+        "chat_id": CHAT_ID,
+        "text": msg
+    })
 
 
 def load_state():
@@ -33,48 +41,111 @@ def save_state(state):
         json.dump(state, f)
 
 
-def get_tickers():
-    with open(TICKERS_FILE, "r") as f:
-        return [x.strip() for x in f.readlines() if x.strip()]
+def load_tickers():
+    with open("tickers.txt", "r") as f:
+        return [
+            x.strip().upper()
+            for x in f.readlines()
+            if x.strip()
+        ]
 
 
-# -------------------------
+# =========================
 # DATA
-# -------------------------
+# =========================
 
-def get_price(symbol):
-    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={API_KEY}"
-    return float(requests.get(url).json()["price"])
-
-
-def get_series(symbol, interval, size=60):
+def fetch(symbol, interval, size=120):
     url = (
-        f"https://api.twelvedata.com/time_series?"
-        f"symbol={symbol}&interval={interval}&outputsize={size}&apikey={API_KEY}"
+        "https://api.twelvedata.com/time_series"
+        f"?symbol={symbol}"
+        f"&interval={interval}"
+        f"&outputsize={size}"
+        f"&apikey={API_KEY}"
     )
-    r = requests.get(url).json()
-    return list(reversed(r["values"]))
+
+    data = requests.get(url).json()
+
+    if "values" not in data:
+        raise Exception(f"{symbol}: {data}")
+
+    return list(reversed(data["values"]))
 
 
-def ema(values, span):
-    closes = [float(x["close"]) for x in values]
-    return pd.Series(closes).ewm(span=span).mean().iloc[-1]
+# =========================
+# MA
+# =========================
+
+def ema(values, period):
+    if len(values) < period:
+        return None
+
+    k = 2 / (period + 1)
+    out = [values[0]]
+
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+
+    return out[-1]
 
 
 def sma(values, period):
-    closes = [float(x["close"]) for x in values]
-    return pd.Series(closes).rolling(period).mean().iloc[-1]
+    if len(values) < period:
+        return None
+
+    return sum(values[-period:]) / period
 
 
-# -------------------------
-# QUALITY SCORE
-# -------------------------
+def detect_cross(symbol):
+    candidates = []
 
-def quality_score(vb, vsma, ha, hb, ca, cb, ma):
+    # DAILY
+    daily = fetch(symbol, "1day", 100)
+    closes_d = [float(x["close"]) for x in daily]
+
+    prev_d = closes_d[-2]
+    now_d = closes_d[-1]
+
+    ema8_d = ema(closes_d[:-1], 8)
+    ema20_d = ema(closes_d[:-1], 20)
+    sma50_d = sma(closes_d[:-1], 50)
+
+    if ema8_d and prev_d >= ema8_d and now_d < ema8_d:
+        candidates.append("D_EMA8")
+
+    if ema20_d and prev_d >= ema20_d and now_d < ema20_d:
+        candidates.append("D_EMA20")
+
+    if sma50_d and prev_d >= sma50_d and now_d < sma50_d:
+        candidates.append("D_SMA50")
+
+    # WEEKLY
+    weekly = fetch(symbol, "1week", 60)
+    closes_w = [float(x["close"]) for x in weekly]
+
+    prev_w = closes_w[-2]
+    now_w = closes_w[-1]
+
+    ema8_w = ema(closes_w[:-1], 8)
+
+    if ema8_w and prev_w >= ema8_w and now_w < ema8_w:
+        candidates.append("W_EMA8")
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda x: MA_PRIORITY[x])
+
+
+# =========================
+# SCORE
+# =========================
+
+def quality_score(vb, vsma, ref_high, hb, ref_close, cb):
     score = 0
 
-    # volume
     vr = vb / vsma if vsma else 0
+
+    # volumen
     if vr > 1.5:
         score += 40
     elif vr > 1:
@@ -83,7 +154,8 @@ def quality_score(vb, vsma, ha, hb, ca, cb, ma):
         score += 10
 
     # breakout strength
-    strength = (hb - ha) / ha
+    strength = (hb - ref_high) / ref_high
+
     if strength > 0.008:
         score += 30
     elif strength > 0.003:
@@ -92,129 +164,133 @@ def quality_score(vb, vsma, ha, hb, ca, cb, ma):
         score += 5
 
     # momentum
-    if cb > ca:
+    if cb > ref_close:
         score += 20
-
-    # MA context
-    if ma == "WEMA8":
-        score += 10
-    elif ma == "SMA50":
-        score += 7
-    elif ma == "EMA20":
-        score += 5
-    else:
-        score += 3
 
     return score
 
 
-MA_PRIORITY = ["WEMA8", "SMA50", "EMA20", "EMA8"]
-
-
-def detect_cross(prev, curr, ma):
-    return prev > ma and curr < ma
-
-
-# -------------------------
-# CORE
-# -------------------------
+# =========================
+# MAIN
+# =========================
 
 def main():
-    tickers = get_tickers()
     state = load_state()
+    tickers = load_tickers()
 
-    for t in tickers:
+    trigger_msgs = []
+
+    for symbol in tickers:
         try:
-            price = get_price(t)
+            if symbol not in state:
+                state[symbol] = {
+                    "watching": False,
+                    "ma": None,
+                    "priority": 0,
+                    "a_high": None,
+                    "a_close": None,
+                    "expiry": 0,
+                    "prev": 0
+                }
 
-            daily = get_series(t, "1day", 100)
-            weekly = get_series(t, "1week", 50)
-            bars30 = get_series(t, "30min", 20)
+            s = state[symbol]
 
-            ma = {
-                "EMA8": ema(daily, 8),
-                "EMA20": ema(daily, 20),
-                "SMA50": sma(daily, 50),
-                "WEMA8": ema(weekly, 8)
-            }
+            # detectar pérdida MA
+            trigger_ma = detect_cross(symbol)
 
-            prev = state.get(t, {}).get("prev", price)
+            # datos 30m
+            bars30 = fetch(symbol, "30min", 30)
 
-            st = state.get(t, {
-                "watching": False,
-                "ma": None,
-                "a_high": None,
-                "alerted": False,
-                "expiry": 10,
-                "prev": price
-            })
+            bar_a = bars30[-2]
+            bar_b = bars30[-1]
 
-            # -------------------------
-            # CROSS DETECTION
-            # -------------------------
-            crossed = None
-            for m in MA_PRIORITY:
-                if detect_cross(prev, price, ma[m]):
-                    crossed = m
-                    break
+            ha = float(bar_a["high"])
+            hb = float(bar_b["high"])
+            ca = float(bar_a["close"])
+            cb = float(bar_b["close"])
 
-            if crossed:
-                st["watching"] = True
-                st["ma"] = crossed
-                st["alerted"] = False
-                st["expiry"] = 10
-                st["a_high"] = None
+            vols = [float(x.get("volume", 0)) for x in bars30[-12:]]
+            vb = vols[-1]
+            vsma = sum(vols[:-1]) / len(vols[:-1]) if vols[:-1] else 0
 
-                send(f"👀 {t} perdió {crossed}")
+            price = cb
 
-            # -------------------------
-            # WATCH MODE
-            # -------------------------
-            if st["watching"] and not st["alerted"]:
+            # activar / reemplazar vigilancia
+            if trigger_ma:
+                p = MA_PRIORITY[trigger_ma]
 
-                bar_a, bar_b = bars30[-2], bars30[-1]
+                if (not s["watching"]) or (p >= s["priority"]):
+                    s["watching"] = True
+                    s["ma"] = trigger_ma
+                    s["priority"] = p
+                    s["a_high"] = ha
+                    s["a_close"] = ca
+                    s["expiry"] = 20
 
-                if not st["a_high"]:
-                    st["a_high"] = float(bar_a["high"])
-                    st["a_close"] = float(bar_a["close"])
-
-                hb = float(bar_b["high"])
-                cb = float(bar_b["close"])
-
-                if hb >= st["a_high"]:
-
-                    # volume
-                    vols = [float(x.get("volume", 0)) for x in bars30[-11:]]
-                    vsma = sum(vols[:-1]) / len(vols[:-1]) if vols[:-1] else 0
-                    vb = vols[-1]
-
-                    score = quality_score(
-                        vb, vsma,
-                        st["a_high"], hb,
-                        st["a_close"], cb,
-                        st["ma"]
+                    trigger_msgs.append(
+                        f"{symbol} → {trigger_ma}"
                     )
+
+            # rolling pivot
+            if s["watching"]:
+
+                if hb >= s["a_high"]:
+                    score = quality_score(
+                        vb,
+                        vsma,
+                        s["a_high"],
+                        hb,
+                        s["a_close"],
+                        cb
+                    )
+
+                    vr = vb / vsma if vsma else 0
 
                     send(
-                        f"🔔 {t} PIVOT\n"
-                        f"MA: {st['ma']}\n"
+                        f"🔔 {symbol} PIVOT 30m\n"
+                        f"MA: {s['ma']}\n"
                         f"Score: {score}/100\n"
-                        f"High A: {st['a_high']}\n"
-                        f"Price: {price}"
+                        f"Price: {price:.2f}\n"
+                        f"VolRatio: {vr:.2f}x"
                     )
 
-                    st["alerted"] = True
-                    st["watching"] = False
+                    state[symbol] = {
+                        "watching": False,
+                        "ma": None,
+                        "priority": 0,
+                        "a_high": None,
+                        "a_close": None,
+                        "expiry": 0,
+                        "prev": price
+                    }
 
-                st["expiry"] -= 1
-                if st["expiry"] <= 0:
-                    st["watching"] = False
+                else:
+                    s["a_high"] = ha
+                    s["a_close"] = ca
+                    s["expiry"] -= 1
 
-            st["prev"] = price
-            state[t] = st
+                    if s["expiry"] <= 0:
+                        state[symbol] = {
+                            "watching": False,
+                            "ma": None,
+                            "priority": 0,
+                            "a_high": None,
+                            "a_close": None,
+                            "expiry": 0,
+                            "prev": price
+                        }
+
+            state[symbol]["prev"] = price
 
         except Exception as e:
-            print(t, e)
+            print(f"{symbol}: {e}")
+
+    # mensaje agrupado triggers
+    if trigger_msgs:
+        send(
+            "👀 WATCHLIST TRIGGERS\n\n"
+            + "\n".join(trigger_msgs)
+        )
 
     save_state(state)
 

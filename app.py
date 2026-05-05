@@ -1,7 +1,10 @@
-from flask import Flask
+from flask import Flask, request
 import subprocess
+import os
 
 app = Flask(__name__)
+
+SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 @app.route("/")
 def home():
@@ -9,5 +12,14 @@ def home():
 
 @app.route("/run")
 def run_bot():
-    subprocess.run(["python", "main.py"])
+    if SECRET:
+        if request.args.get("key") != SECRET:
+            return "unauthorized", 401
+
+    subprocess.run(
+        ["python", "main.py"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
     return "ok", 200

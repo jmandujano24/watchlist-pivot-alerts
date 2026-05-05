@@ -101,33 +101,29 @@ def detect_cross(symbol):
     # DAILY
     daily = fetch(symbol, "1day", 100)
     closes_d = [float(x["close"]) for x in daily]
-
-    prev_d = closes_d[-2]
     now_d = closes_d[-1]
 
-    ema8_d = ema(closes_d[:-1], 8)
-    ema20_d = ema(closes_d[:-1], 20)
-    sma50_d = sma(closes_d[:-1], 50)
+    ema8_d = ema(closes_d, 8)
+    ema20_d = ema(closes_d, 20)
+    sma50_d = sma(closes_d, 50)
 
-    if ema8_d and prev_d >= ema8_d and now_d < ema8_d:
+    if ema8_d and now_d < ema8_d:
         candidates.append("D_EMA8")
 
-    if ema20_d and prev_d >= ema20_d and now_d < ema20_d:
+    if ema20_d and now_d < ema20_d:
         candidates.append("D_EMA20")
 
-    if sma50_d and prev_d >= sma50_d and now_d < sma50_d:
+    if sma50_d and now_d < sma50_d:
         candidates.append("D_SMA50")
 
     # WEEKLY
     weekly = fetch(symbol, "1week", 60)
     closes_w = [float(x["close"]) for x in weekly]
-
-    prev_w = closes_w[-2]
     now_w = closes_w[-1]
 
-    ema8_w = ema(closes_w[:-1], 8)
+    ema8_w = ema(closes_w, 8)
 
-    if ema8_w and prev_w >= ema8_w and now_w < ema8_w:
+    if ema8_w and now_w < ema8_w:
         candidates.append("W_EMA8")
 
     if not candidates:

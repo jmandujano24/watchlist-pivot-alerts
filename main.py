@@ -277,9 +277,9 @@ def main():
                         }
 
             state[symbol]["prev"] = price
-
-        except Exception as e:
-            print(f"{symbol}: {e}")
+            
+except Exception:
+    continue
 
     # mensaje agrupado triggers
     if trigger_msgs:

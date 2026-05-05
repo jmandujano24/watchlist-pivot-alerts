@@ -215,12 +215,12 @@ def main():
             if trigger_ma:
                 p = MA_PRIORITY[trigger_ma]
 
-                if (not s["watching"]) or (p >= s["priority"]):
+                if (not s["watching"]) or (p > s["priority"]):
                     s["watching"] = True
                     s["ma"] = trigger_ma
                     s["priority"] = p
-                    s["a_high"] = ha
-                    s["a_close"] = ca
+                    s["a_high"] = hb
+                    s["a_close"] = cb
                     s["expiry"] = 20
 
                     trigger_msgs.append(

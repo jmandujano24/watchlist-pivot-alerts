@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import requests
@@ -22,10 +23,15 @@ MA_PRIORITY = {
 
 def send(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": msg
-    })
+
+    requests.post(
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": msg
+        },
+        timeout=20
+    )
 
 
 def load_state():
@@ -63,7 +69,7 @@ def fetch(symbol, interval, size=120):
         f"&apikey={API_KEY}"
     )
 
-    data = requests.get(url).json()
+    data = requests.get(url, timeout=20).json()
 
     if "values" not in data:
         raise Exception(f"{symbol}: {data}")
@@ -80,6 +86,7 @@ def ema(values, period):
         return None
 
     k = 2 / (period + 1)
+
     out = [values[0]]
 
     for v in values[1:]:
@@ -100,7 +107,9 @@ def detect_cross(symbol):
 
     # DAILY
     daily = fetch(symbol, "1day", 100)
+
     closes_d = [float(x["close"]) for x in daily]
+
     now_d = closes_d[-1]
 
     ema8_d = ema(closes_d, 8)
@@ -118,7 +127,9 @@ def detect_cross(symbol):
 
     # WEEKLY
     weekly = fetch(symbol, "1week", 60)
+
     closes_w = [float(x["close"]) for x in weekly]
+
     now_w = closes_w[-1]
 
     ema8_w = ema(closes_w, 8)
@@ -172,12 +183,15 @@ def quality_score(vb, vsma, ref_high, hb, ref_close, cb):
 
 def main():
     state = load_state()
+
     tickers = load_tickers()
 
     trigger_msgs = []
 
     for symbol in tickers:
+
         try:
+
             if symbol not in state:
                 state[symbol] = {
                     "watching": False,
@@ -202,25 +216,39 @@ def main():
 
             ha = float(bar_a["high"])
             hb = float(bar_b["high"])
+
             ca = float(bar_a["close"])
             cb = float(bar_b["close"])
 
-            vols = [float(x.get("volume", 0)) for x in bars30[-12:]]
+            vols = [
+                float(x.get("volume", 0))
+                for x in bars30[-12:]
+            ]
+
             vb = vols[-1]
-            vsma = sum(vols[:-1]) / len(vols[:-1]) if vols[:-1] else 0
+
+            vsma = (
+                sum(vols[:-1]) / len(vols[:-1])
+                if vols[:-1]
+                else 0
+            )
 
             price = cb
 
             # activar / reemplazar vigilancia
             if trigger_ma:
+
                 p = MA_PRIORITY[trigger_ma]
 
                 if (not s["watching"]) or (p > s["priority"]):
+
                     s["watching"] = True
                     s["ma"] = trigger_ma
                     s["priority"] = p
+
                     s["a_high"] = hb
                     s["a_close"] = cb
+
                     s["expiry"] = 20
 
                     trigger_msgs.append(
@@ -231,6 +259,7 @@ def main():
             if s["watching"]:
 
                 if hb >= s["a_high"]:
+
                     score = quality_score(
                         vb,
                         vsma,
@@ -261,11 +290,15 @@ def main():
                     }
 
                 else:
-                    s["a_high"] = ha
-                    s["a_close"] = ca
+
+                    # rolling real
+                    s["a_high"] = hb
+                    s["a_close"] = cb
+
                     s["expiry"] -= 1
 
                     if s["expiry"] <= 0:
+
                         state[symbol] = {
                             "watching": False,
                             "ma": None,
@@ -277,12 +310,13 @@ def main():
                         }
 
             state[symbol]["prev"] = price
-            
-except Exception:
-    continue
+
+        except Exception:
+            continue
 
     # mensaje agrupado triggers
     if trigger_msgs:
+
         send(
             "👀 WATCHLIST TRIGGERS\n\n"
             + "\n".join(trigger_msgs)
@@ -293,3 +327,4 @@ except Exception:
 
 if __name__ == "__main__":
     main()
+```
